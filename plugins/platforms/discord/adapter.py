@@ -1248,6 +1248,33 @@ class DiscordAdapter(BasePlatformAdapter):
             self._release_platform_lock()
             return False
 
+    def _scoped_bot_allowed(self, user_id: Any, channel_id: Any) -> bool:
+        """Enforce an optional exact channel -> bot ID map for this adapter.
+
+        With no map, preserve the existing DISCORD_ALLOW_BOTS behavior for
+        other profiles. A configured but empty/malformed map fails closed.
+        """
+        if "bot_allowlist" not in self.config.extra:
+            return True
+        policy = self.config.extra["bot_allowlist"]
+        # `hermes config set` stores structured CLI values as strings; accept
+        # JSON from that supported configuration path without widening scope.
+        if isinstance(policy, str):
+            try:
+                policy = json.loads(policy)
+            except ValueError:
+                return False
+        if not isinstance(policy, dict):
+            return False
+        members = policy.get(str(channel_id))
+        if not isinstance(members, (list, tuple, set)):
+            return False
+        return str(user_id) in {
+            str(value) for value in members
+            if isinstance(value, (int, str)) and not isinstance(value, bool)
+            and str(value).isdigit()
+        }
+
     def _discord_message_admission(
         self,
         message: Any,
@@ -1270,6 +1297,15 @@ class DiscordAdapter(BasePlatformAdapter):
         if getattr(message.author, "bot", False):
             allow_bots = os.getenv("DISCORD_ALLOW_BOTS", "none").lower().strip()
             if allow_bots == "none":
+                return False, False
+            scoped_channels = (
+                message.channel.id,
+                self._get_parent_channel_id(message.channel),
+            )
+            if not any(
+                self._scoped_bot_allowed(message.author.id, channel_id)
+                for channel_id in scoped_channels if channel_id
+            ):
                 return False, False
             if allow_bots == "mentions" and not self._self_is_explicitly_mentioned(message):
                 return False, False
@@ -5919,6 +5955,7 @@ class DiscordAdapter(BasePlatformAdapter):
         # trigger — Discord snowflake IDs are monotonically increasing, so
         # a simple int comparison suffices.
         channel_id = str(getattr(channel, "id", ""))
+        scoped_channels = (channel_id, self._get_parent_channel_id(channel))
         _cached_id = self._last_self_message_id.get(channel_id)
         _after_obj = None
         try:
@@ -5955,7 +5992,13 @@ class DiscordAdapter(BasePlatformAdapter):
                 if (
                     is_bot_author
                     and msg.author != self._client.user
-                    and not include_other_bots
+                    and (
+                        not include_other_bots
+                        or not any(
+                            self._scoped_bot_allowed(msg.author.id, scoped_channel_id)
+                            for scoped_channel_id in scoped_channels if scoped_channel_id
+                        )
+                    )
                 ):
                     return None
                 if not content and msg.attachments:

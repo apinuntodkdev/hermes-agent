@@ -55,6 +55,11 @@ def _make_bare_runner():
     # any allowlist check succeeds; stub it to never approve so we exercise
     # the real allowlist path.
     runner.pairing_store = SimpleNamespace(is_approved=lambda *_a, **_kw: False)
+    # A real Discord inbound always has a registered adapter. No scoped policy
+    # is configured here, so ALLOW_BOTS keeps its legacy authorization behavior.
+    runner.__dict__["adapters"] = {
+        Platform.DISCORD: SimpleNamespace(config=SimpleNamespace(extra={}))
+    }
     return runner
 
 

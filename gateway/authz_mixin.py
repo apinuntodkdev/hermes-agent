@@ -353,6 +353,31 @@ class GatewayAuthorizationMixin:
 
         adapter_profile = self._adapter_profile_for_source(source)
 
+        # A profile may admit bot-authored Discord messages only from selected
+        # IDs in selected channels. Enforce that before upstream/bot bypasses;
+        # registered adapters without a bot_allowlist keep their previous policy.
+        if source.platform == Platform.DISCORD and getattr(source, "is_bot", False):
+            discord_adapter = self._adapter_for_source(source)
+            # The relay's authenticated delivery marker is the sole exception:
+            # it can carry a Discord source without a local Discord adapter.
+            if discord_adapter is None and source.delivered_via_upstream_relay is not True:
+                return False
+            scoped_bot_check = getattr(discord_adapter, "_scoped_bot_allowed", None)
+            if callable(scoped_bot_check):
+                # A Discord auto-thread routes the reply to a new chat ID, but
+                # the inbound message was admitted in its parent channel.
+                # Keep explicitly allowlisted thread IDs working as well.
+                scoped_chats = (source.chat_id, source.parent_chat_id)
+                if not any(
+                    scoped_bot_check(source.user_id, chat_id)
+                    for chat_id in scoped_chats if chat_id
+                ):
+                    return False
+            elif discord_adapter is not None:
+                extra = getattr(getattr(discord_adapter, "config", None), "extra", None)
+                if isinstance(extra, dict) and "bot_allowlist" in extra:
+                    return False
+
         # Relay (and any adapter whose authorization is enforced by a trusted
         # authenticated upstream): the Team Gateway connector authenticates this
         # gateway's WS with a per-instance secret and resolves owner-only author
